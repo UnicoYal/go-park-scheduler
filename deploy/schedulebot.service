@@ -1,0 +1,33 @@
+[Unit]
+Description=Technopark Telegram schedule bot
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=schedulebot
+Group=schedulebot
+EnvironmentFile=/etc/schedulebot.env
+WorkingDirectory=/var/lib/schedulebot
+ExecStart=/opt/schedulebot/schedulebot
+Restart=on-failure
+RestartSec=5s
+UMask=0077
+
+# The bot only needs outbound HTTPS and its private state directory.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ReadWritePaths=/var/lib/schedulebot
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=true
+MemoryDenyWriteExecute=true
+
+[Install]
+WantedBy=multi-user.target
