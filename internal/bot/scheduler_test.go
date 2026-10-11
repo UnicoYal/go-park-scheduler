@@ -1,9 +1,11 @@
 package bot
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"log"
+	"strings"
 	"testing"
 	"time"
 
@@ -69,5 +71,73 @@ func TestUntilNextHour(t *testing.T) {
 	want := 35*time.Minute + 55*time.Second
 	if got := untilNextHour(now); got != want {
 		t.Fatalf("until next hour=%s, want %s", got, want)
+	}
+}
+
+type waitingSchedulerStore struct {
+	events []model.Event
+}
+
+func (s *waitingSchedulerStore) Add(event model.Event) (model.Event, error) { return event, nil }
+func (s *waitingSchedulerStore) ListAll() []model.Event                     { return s.events }
+func (s *waitingSchedulerStore) DeleteByID(string) error                    { return nil }
+func (s *waitingSchedulerStore) Due(time.Time) []model.Event                { return nil }
+func (s *waitingSchedulerStore) MarkDelivered(string, int64) error          { return nil }
+func (s *waitingSchedulerStore) MarkNotified(string, time.Time) error       { return nil }
+
+func TestSchedulerHeartbeatReportsWaitingAndNextNotification(t *testing.T) {
+	loc := time.FixedZone("Moscow", 3*60*60)
+	now := time.Date(2026, 10, 6, 11, 0, 0, 0, loc)
+	events := &waitingSchedulerStore{events: []model.Event{{
+		ID: "rk1", Kind: model.Checkpoint,
+		StartsAt: time.Date(2026, 10, 7, 18, 0, 0, 0, loc),
+	}}}
+	auth := &authTestStore{owner: 100, delivery: []int64{-100}}
+	var logs bytes.Buffer
+	templates, err := LoadTemplates("../../templates")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := New(&authTestClient{}, events, auth, templates, "password", loc, log.New(&logs, "", 0))
+	b.now = func() time.Time { return now }
+
+	b.deliverDue(context.Background())
+
+	got := logs.String()
+	for _, want := range []string{
+		"scheduler heartbeat:",
+		"checked_at=2026-10-06T11:00:00+03:00",
+		"status=waiting",
+		"due_events=0",
+		"sent_messages=0",
+		"next_notification_at=2026-10-06T18:00:00+03:00",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("heartbeat %q does not contain %q", got, want)
+		}
+	}
+}
+
+func TestSchedulerHeartbeatReportsOutsideDeliveryWindow(t *testing.T) {
+	loc := time.FixedZone("Moscow", 3*60*60)
+	now := time.Date(2026, 10, 6, 23, 0, 0, 0, loc)
+	events := &waitingSchedulerStore{events: []model.Event{{
+		ID: "rk1", Kind: model.Checkpoint,
+		StartsAt: time.Date(2026, 10, 7, 18, 0, 0, 0, loc),
+	}}}
+	auth := &authTestStore{owner: 100, delivery: []int64{-100}}
+	var logs bytes.Buffer
+	templates, err := LoadTemplates("../../templates")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := New(&authTestClient{}, events, auth, templates, "password", loc, log.New(&logs, "", 0))
+	b.now = func() time.Time { return now }
+
+	b.deliverDue(context.Background())
+
+	got := logs.String()
+	if !strings.Contains(got, "status=outside_delivery_window") || !strings.Contains(got, "blocked_by_window=1") {
+		t.Fatalf("unexpected heartbeat: %q", got)
 	}
 }

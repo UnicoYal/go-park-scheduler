@@ -141,14 +141,24 @@ func untilNextHour(now time.Time) time.Duration {
 
 func (b *Bot) deliverDue(ctx context.Context) {
 	now := b.now()
+	events := b.store.ListAll()
 	deliveryChats := b.auth.DeliveryChats()
+	dueEvents := b.store.Due(now)
+	blockedByWindow := countReadyOutsideDeliveryWindow(events, now)
+
 	if len(deliveryChats) == 0 {
+		b.logSchedulerHeartbeat(now, "no_delivery_chats", events, len(dueEvents), blockedByWindow, 0, 0, 0)
 		return
 	}
-	for _, event := range b.store.Due(now) {
+
+	sentMessages := 0
+	completedEvents := 0
+	errorsCount := 0
+	for _, event := range dueEvents {
 		text, err := b.tmpl.Render(event, b.loc)
 		if err != nil {
 			b.log.Printf("render notification for %s: %v", event.ID, err)
+			errorsCount++
 			continue
 		}
 		allDelivered := true
@@ -159,19 +169,79 @@ func (b *Bot) deliverDue(ctx context.Context) {
 			if err := b.client.SendMessage(ctx, chatID, text); err != nil {
 				b.log.Printf("send notification %s to chat %d: %v", event.ID, chatID, err)
 				allDelivered = false
+				errorsCount++
 				continue
 			}
+			sentMessages++
 			if err := b.store.MarkDelivered(event.ID, chatID); err != nil {
 				b.log.Printf("IMPORTANT: notification %s sent to chat %d but delivery not saved: %v", event.ID, chatID, err)
 				allDelivered = false
+				errorsCount++
 			}
 		}
 		if allDelivered {
 			if err := b.store.MarkNotified(event.ID, now); err != nil {
 				b.log.Printf("IMPORTANT: notification %s delivered but not completed: %v", event.ID, err)
+				errorsCount++
+			} else {
+				completedEvents++
 			}
 		}
 	}
+
+	status := "waiting"
+	if blockedByWindow > 0 {
+		status = "outside_delivery_window"
+	}
+	if len(dueEvents) > 0 {
+		status = "delivered"
+		if errorsCount > 0 {
+			status = "partial_failure"
+		}
+	}
+	b.logSchedulerHeartbeat(now, status, events, len(dueEvents), blockedByWindow, sentMessages, completedEvents, errorsCount)
+}
+
+func countReadyOutsideDeliveryWindow(events []model.Event, now time.Time) int {
+	count := 0
+	for _, event := range events {
+		if event.NotifiedAt != nil || !event.StartsAt.After(now) || now.Before(event.NotificationAt()) {
+			continue
+		}
+		if !event.CanNotifyAt(now) {
+			count++
+		}
+	}
+	return count
+}
+
+func (b *Bot) logSchedulerHeartbeat(now time.Time, status string, events []model.Event, dueEvents, blockedByWindow, sentMessages, completedEvents, errorsCount int) {
+	nextField := ""
+	if next, ok := nextPendingNotification(events, now); ok {
+		nextField = fmt.Sprintf(" next_notification_at=%s", next.In(b.loc).Format(time.RFC3339))
+	}
+	b.log.Printf(
+		"scheduler heartbeat: checked_at=%s status=%s events=%d delivery_chats=%d due_events=%d blocked_by_window=%d sent_messages=%d completed_events=%d errors=%d%s",
+		now.In(b.loc).Format(time.RFC3339), status, len(events), len(b.auth.DeliveryChats()), dueEvents, blockedByWindow,
+		sentMessages, completedEvents, errorsCount, nextField,
+	)
+}
+
+func nextPendingNotification(events []model.Event, now time.Time) (time.Time, bool) {
+	var next time.Time
+	for _, event := range events {
+		if event.NotifiedAt != nil || !event.StartsAt.After(now) {
+			continue
+		}
+		notificationAt := event.NotificationAt()
+		if !notificationAt.After(now) {
+			continue
+		}
+		if next.IsZero() || notificationAt.Before(next) {
+			next = notificationAt
+		}
+	}
+	return next, !next.IsZero()
 }
 
 func (b *Bot) handleMessage(ctx context.Context, message *telegram.Message) error {
